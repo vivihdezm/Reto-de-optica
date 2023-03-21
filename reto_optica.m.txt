@@ -1,0 +1,244 @@
+clc, clear, close all
+
+%% Intensity information
+I1 = getImage("DSC_0014.jpg");
+I2 = getImage("DSC_0015.jpg");
+I3 = getImage("DSC_0016.jpg");
+I4 = getImage("DSC_0017.jpg");
+
+%% Intensity blurring by FFT
+I1 = blurFFT(I1,300);
+I2 = blurFFT(I2,300);
+I3 = blurFFT(I3,300);
+I4 = blurFFT(I4,300);
+
+%% Phase wrapping by 4 images
+phase = atan2(I4-I2,I1-I3);
+
+%% Phase cleaning
+phase = clearPhase(phase);
+
+%% First phase unwrapping
+phase_uw = Unwrap_TIE_DCT_Iter(phase);  
+
+%% Second phase unwrapping
+phase_uw2 = Fast_Unwrap(phase_uw);
+
+%% Scaling factors
+alpha = 0;
+beta = 38;
+Z = -phase_uw2/2/pi*1/(tand(alpha)+tand(beta));
+[height,width] = size(phase_uw2);   % Size of image data
+conversion = 2/1360;                % 1 pixel = 2/1360 cm
+x = (1:width)*conversion;           
+y = (1:height)*conversion;
+[X,Y] = meshgrid(x,y);
+
+%% Plot Results
+
+figure
+subplot(2,2,1)
+surf(X,Y,I1), title("Esfera. Sombreado 2 con \delta = 0"), colormap gray
+xlabel("x [cm]"), ylabel("y  [cm]"), zlabel("z [cm]"), axis square
+subplot(2,2,2)
+imagesc(I2), title("Esfera. Sombreado con \delta = \pi/2")
+xlabel("x [cm]"), ylabel("y  [cm]"), zlabel("z [cm]"), axis square
+subplot(2,2,3)
+imagesc(I3), title("Esfera. Sombreado con \delta = \pi")
+xlabel("x [cm]"), ylabel("y  [cm]"), zlabel("z [cm]"), axis square
+subplot(2,2,4)
+imagesc(I4), title("Esfera. Sombreado con \delta = 3\pi/2")
+xlabel("x [cm]"), ylabel("y  [cm]"), zlabel("z [cm]"), axis square
+figure, surface(phase), shading interp, view(2), axis square, colormap gray
+figure, surface(X,Y,Z), shading interp, colormap gray, view([30 60]), axis square, view(2)
+xlabel("x [cm]"), ylabel("y  [cm]"), zlabel("z [cm]"), title("Objeto 3D, Método por proyección")
+
+% Functions
+function FU = FFT(U)
+    FU = fftshift(fft2(U));
+end
+function U = iFFT(FU)
+    U = ifft2(ifftshift(FU));
+end
+function out = circle(x,y,r)
+    out = sqrt(x^2 + y^2) <= r;
+end
+function soft_image = blurFFT(image,softness)
+fftI = FFT(image);
+[row,col] = size(fftI);
+for i = 1:row
+    for j = 1:col
+        if ~circle(i-row/2,j-col/2,softness)
+           fftI(i,j) = 0;
+        end
+    end
+end
+soft_image = abs(iFFT(fftI));
+end
+function phase_clear = clearPhase(phase)
+ f_phase = phase(end-10,:);
+[n,m] = size(phase);
+phase_clear = zeros(n,m);
+for i = 1:n
+    phase_clear(i,:) = phase(i,:) - f_phase;
+end   
+end
+
+function I = cut(I,ncut,mcut)
+    % Recorta las matrices finales a un noveno en el centro
+    [n,m] = size(I);
+    n1 = ceil(n/ncut);
+    m1 = ceil(m/mcut);
+    I = I(ceil((n-n1)/2)+1+500:ceil((n+n1)/2)+500, ceil((m-m1)/2)+1:ceil((m+m1)/2));
+end
+function I = getImage(name)
+    I = imread(name);
+    I = rgb2gray(I);
+    I = cut(I,1.6,2.5);
+end
+function res_img = Fast_Unwrap(img)
+    [Ny, Nx] = size(img);
+    % get the reliability
+    reliability = get_reliability(img); % (Ny,Nx)
+    % get the edges
+    [h_edges, v_edges] = get_edges(reliability); % (Ny,Nx) and (Ny,Nx)
+    % combine all edges and sort it
+    edges = [h_edges(:); v_edges(:)];
+    edge_bound_idx = Ny * Nx; % if i <= edge_bound_idx, it is h_edges
+    [~, edge_sort_idx] = sort(edges, 'descend');
+    % get the indices of pixels adjacent to the edges
+    idxs1 = mod(edge_sort_idx - 1, edge_bound_idx) + 1;
+    idxs2 = idxs1 + 1 + (Ny - 1) .* (edge_sort_idx <= edge_bound_idx);
+    % label the group
+    group = reshape([1:numel(img)], Ny*Nx, 1);
+    is_grouped = zeros(Ny*Nx,1);
+    group_members = cell(Ny*Nx,1);
+    for i = 1:size(is_grouped,1)
+        group_members{i} = i;
+    end
+    num_members_group = ones(Ny*Nx,1);
+    % propagate the unwrapping
+    res_img = img;
+    num_nan = sum(isnan(edges)); % count how many nan-s and skip them
+    for i = num_nan+1 : length(edge_sort_idx)
+        % get the indices of the adjacent pixels
+        idx1 = idxs1(i);
+        idx2 = idxs2(i);
+        % skip if they belong to the same group
+        if (group(idx1) == group(idx2)) continue; end
+        % idx1 should be ungrouped (swap if idx2 ungrouped and idx1 grouped)
+        % otherwise, activate the flag all_grouped.
+        % The group in idx1 must be smaller than in idx2. If initially
+        % group(idx1) is larger than group(idx2), then swap it.
+        all_grouped = 0;
+        if is_grouped(idx1)
+            if ~is_grouped(idx2)
+                idxt = idx1;
+                idx1 = idx2;
+                idx2 = idxt;
+            elseif num_members_group(group(idx1)) > num_members_group(group(idx2))
+                idxt = idx1;
+                idx1 = idx2;
+                idx2 = idxt;
+                all_grouped = 1;
+            else
+                all_grouped = 1;
+            end
+        end
+        % calculate how much we should add to the idx1 and group
+        dval = floor((res_img(idx2) - res_img(idx1) + pi) / (2*pi)) * 2*pi;
+        % which pixel should be changed
+        g1 = group(idx1);
+        g2 = group(idx2);
+        if all_grouped
+            pix_idxs = group_members{g1};
+        else
+            pix_idxs = idx1;
+        end
+        % add the pixel value
+        if dval ~= 0
+            res_img(pix_idxs) = res_img(pix_idxs) + dval;
+        end
+        % change the group
+        len_g1 = num_members_group(g1);
+        len_g2 = num_members_group(g2);
+        group_members{g2}(len_g2+1:len_g2+len_g1) = pix_idxs;
+        group(pix_idxs) = g2; % assign the pixels to the new group
+        num_members_group(g2) = num_members_group(g2) + len_g1;
+        % mark idx1 and idx2 as already being grouped
+        is_grouped(idx1) = 1;
+        is_grouped(idx2) = 1;
+    end
+end
+function rel = get_reliability(img)
+    rel = zeros(size(img));
+    % get the shifted images (N-2, N-2)
+    img_im1_jm1 = img(1:end-2, 1:end-2);
+    img_i_jm1   = img(2:end-1, 1:end-2);
+    img_ip1_jm1 = img(3:end  , 1:end-2);
+    img_im1_j   = img(1:end-2, 2:end-1);
+    img_i_j     = img(2:end-1, 2:end-1);
+    img_ip1_j   = img(3:end  , 2:end-1);
+    img_im1_jp1 = img(1:end-2, 3:end  );
+    img_i_jp1   = img(2:end-1, 3:end  );
+    img_ip1_jp1 = img(3:end  , 3:end  );
+    % calculate the difference
+    gamma = @(x) sign(x) .* mod(abs(x), pi);
+    H  = gamma(img_im1_j   - img_i_j) - gamma(img_i_j - img_ip1_j  );
+    V  = gamma(img_i_jm1   - img_i_j) - gamma(img_i_j - img_i_jp1  );
+    D1 = gamma(img_im1_jm1 - img_i_j) - gamma(img_i_j - img_ip1_jp1);
+    D2 = gamma(img_im1_jp1 - img_i_j) - gamma(img_i_j - img_ip1_jm1);
+    % calculate the second derivative
+    D = sqrt(H.*H + V.*V + D1.*D1 + D2.*D2);
+    % assign the reliability as 1 / D
+    rel(2:end-1, 2:end-1) = 1./D;
+    % assign all nan's in rel with non-nan in img to 0 also assign the nan's in img to nan
+    rel(isnan(rel) & ~isnan(img)) = 0;
+    rel(isnan(img)) = nan;
+end
+function [h_edges, v_edges] = get_edges(rel)
+    [Ny, Nx] = size(rel);
+    h_edges = [rel(1:end, 2:end) + rel(1:end, 1:end-1), nan(Ny, 1)];
+    v_edges = [rel(2:end, 1:end) + rel(1:end-1, 1:end); nan(1, Nx)];
+end
+function [phase_unwrap,N] = Unwrap_TIE_DCT_Iter(phase_wrap)   
+   phi1 = unwrap_TIE(phase_wrap);
+   phi1=phi1+mean2(phase_wrap)-mean2(phi1); %adjust piston
+    K1=round((phi1-phase_wrap)/2/pi);  %calculate integer K
+    phase_unwrap=phase_wrap+2*K1*pi; 
+    residue=wrapToPi(phase_unwrap-phi1);
+    phi1=phi1+unwrap_TIE(residue);
+    phi1=phi1+mean2(phase_wrap)-mean2(phi1); %adjust piston
+    K2=round((phi1-phase_wrap)/2/pi);  %calculate integer K
+    phase_unwrap=phase_wrap+2*K2*pi; 
+    residue=wrapToPi(phase_unwrap-phi1);
+    N=0;
+   while sum(sum(abs(K2-K1)))>0 
+       K1=K2;
+       phic=unwrap_TIE(residue);
+     phi1=phi1+phic;
+     phi1=phi1+mean2(phase_wrap)-mean2(phi1); %adjust piston
+    K2=round((phi1-phase_wrap)/2/pi);  %calculate integer K
+    phase_unwrap=phase_wrap+2*K2*pi; 
+    residue=wrapToPi(phase_unwrap-phi1);
+    N=N+1;
+   end
+end
+function [phase_unwrap] = unwrap_TIE(phase_wrap)
+      psi=exp(1i*phase_wrap);
+      edx = [zeros([size(psi,1),1]), wrapToPi(diff(psi, 1, 2)), zeros([size(psi,1),1])];
+      edy = [zeros([1,size(psi,2)]); wrapToPi(diff(psi, 1, 1)); zeros([1,size(psi,2)])];
+       lap = diff(edx, 1, 2) + diff(edy, 1, 1); %calculate Laplacian using the finite difference
+        rho=imag(conj(psi).*lap);   % calculate right hand side of Eq.(4) in the manuscript
+   phase_unwrap = solvePoisson(rho); 
+end
+function phi = solvePoisson(rho)
+    % solve the poisson equation using DCT
+    dctRho = dct2(rho);
+    [N, M] = size(rho);
+    [I, J] = meshgrid([0:M-1], [0:N-1]);
+    dctPhi = dctRho ./ 2 ./ (cos(pi*I/M) + cos(pi*J/N) - 2);
+    dctPhi(1,1) = 0; % handling the inf/nan value
+    % now invert to get the result
+    phi = idct2(dctPhi);
+end
